@@ -1,891 +1,692 @@
--- BUBA MM2 - authorized Studio/test-place panel
--- Place this LocalScript in StarterPlayerScripts.
+-- BUBA MM2 - authorized companion panel
+-- LocalScript: StarterPlayer > StarterPlayerScripts
 --
--- Optional server-published test data:
--- ReplicatedStorage.MM2TestState (Folder) attributes:
---   MurdererUserId     number/string
---   SheriffUserId      number/string
---   SheriffGunDropped  boolean
---   DroppedGunPosition Vector3
+-- Optional data published by YOUR server in an experience you own:
+-- ReplicatedStorage.MM2PublicState (Folder) attributes:
+--   RoundStatus       string
+--   MurdererUserId    number
+--   SheriffUserId     number
+--   SheriffGunDropped boolean
 --
--- Player role attributes may also be published by your own server:
---   Player:SetAttribute("MM2Role", "Murderer" | "Sheriff" | "Innocent")
---
--- This script does not infer hidden roles, provide ESP, alter movement,
--- target players, or automate gameplay.
+-- Players may have a server-published "MM2Role" attribute.
+-- This script does not inspect hidden game state or affect other players.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-local StarterGui = game:GetService("StarterGui")
 local UserInputService = game:GetService("UserInputService")
+local ContentProvider = game:GetService("ContentProvider")
+local TweenService = game:GetService("TweenService")
+local StarterGui = game:GetService("StarterGui")
 
-local localPlayer = Players.LocalPlayer
-local playerGui = localPlayer:WaitForChild("PlayerGui")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
 
-local function create(className, parent, properties)
-	local instance = Instance.new(className)
+local PRIMARY_LOGO = "rbxassetid://129287367563025"
+local BACKUP_LOGO = "rbxassetid://114072040627090"
 
-	for property, value in pairs(properties or {}) do
-		instance[property] = value
+local themes = {
+	{name = "Blue", accent = Color3.fromRGB(55, 170, 255), panel = Color3.fromRGB(20, 22, 29), surface = Color3.fromRGB(34, 37, 48)},
+	{name = "Purple", accent = Color3.fromRGB(165, 105, 255), panel = Color3.fromRGB(20, 22, 29), surface = Color3.fromRGB(34, 37, 48)},
+	{name = "Orange", accent = Color3.fromRGB(255, 135, 45), panel = Color3.fromRGB(20, 22, 29), surface = Color3.fromRGB(34, 37, 48)},
+}
+
+local themeIndex = 1
+local theme = themes[themeIndex]
+local savedTab = "Players"
+local selectedPlayer
+local stateFolder
+local stateConnections = {}
+local previousRound
+local previousMurderer
+local previousSheriff
+local previousGunDropped
+local visualHighlight
+local notificationHistory = {}
+
+local function make(className, parent, props)
+	local object = Instance.new(className)
+	for key, value in pairs(props or {}) do
+		object[key] = value
+	end
+	object.Parent = parent
+	return object
+end
+
+local function rounded(object, radius)
+	make("UICorner", object, {CornerRadius = UDim.new(0, radius)})
+end
+
+local function notify(message)
+	table.insert(notificationHistory, 1, os.date("%H:%M:%S") .. "  " .. message)
+	while #notificationHistory > 8 do
+		table.remove(notificationHistory)
 	end
 
-	instance.Parent = parent
-	return instance
-end
-
-local function addCorner(instance, radius)
-	create("UICorner", instance, {
-		CornerRadius = UDim.new(0, radius),
-	})
-end
-
-local function notify(title, message)
 	pcall(function()
 		StarterGui:SetCore("SendNotification", {
-			Title = title,
+			Title = "BUBA MM2",
 			Text = message,
 			Duration = 4,
 		})
 	end)
+
+	if historyLabel then
+		historyLabel.Text = #notificationHistory > 0
+			and table.concat(notificationHistory, "\n")
+			or "No notifications yet."
+	end
 end
 
-local palettes = {
-	{
-		name = "Orange",
-		accent = Color3.fromRGB(255, 130, 35),
-		panel = Color3.fromRGB(22, 22, 24),
-		surface = Color3.fromRGB(34, 34, 37),
-	},
-	{
-		name = "Cyan",
-		accent = Color3.fromRGB(40, 190, 220),
-		panel = Color3.fromRGB(22, 22, 24),
-		surface = Color3.fromRGB(34, 34, 37),
-	},
-	{
-		name = "Purple",
-		accent = Color3.fromRGB(160, 100, 240),
-		panel = Color3.fromRGB(22, 22, 24),
-		surface = Color3.fromRGB(34, 34, 37),
-	},
-}
-
-local paletteIndex = 1
-local palette = palettes[paletteIndex]
-local transparency = 0
-local sizeIndex = 2
-local sizeOptions = {
-	UDim2.new(0.84, 0, 0.78, 0),
-	UDim2.new(0.90, 0, 0.82, 0),
-	UDim2.new(0.94, 0, 0.86, 0),
-}
-
-local themeBindings = {}
-local accentObjects = {}
-local navButtons = {}
-local currentTab = "Players"
-local selectedPlayer = nil
-local fpsEnabled = false
-local fpsConnection = nil
-
-local function bindTheme(instance, slot)
-	table.insert(themeBindings, {
-		instance = instance,
-		slot = slot,
-	})
-end
-
-local screenGui = create("ScreenGui", playerGui, {
-	Name = "BUBAMM2Panel",
+local gui = make("ScreenGui", playerGui, {
+	Name = "BUBAMM2Companion",
 	ResetOnSpawn = false,
-	IgnoreGuiInset = false,
 	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 })
 
-local main = create("Frame", screenGui, {
-	Name = "MainPanel",
+local main = make("Frame", gui, {
+	Name = "Main",
 	AnchorPoint = Vector2.new(0.5, 0.5),
 	Position = UDim2.fromScale(0.5, 0.5),
-	Size = sizeOptions[sizeIndex],
-	BackgroundColor3 = palette.panel,
+	Size = UDim2.fromScale(0.9, 0.78),
+	BackgroundColor3 = theme.panel,
 	BorderSizePixel = 0,
 })
-addCorner(main, 14)
-bindTheme(main, "panel")
+rounded(main, 14)
 
-create("UISizeConstraint", main, {
-	MinSize = Vector2.new(320, 300),
-	MaxSize = Vector2.new(900, 680),
+make("UISizeConstraint", main, {
+	MinSize = Vector2.new(300, 310),
+	MaxSize = Vector2.new(800, 650),
 })
 
-local header = create("Frame", main, {
+local header = make("Frame", main, {
 	Name = "Header",
 	Size = UDim2.new(1, 0, 0, 48),
-	BackgroundColor3 = palette.surface,
+	BackgroundColor3 = theme.surface,
 	BorderSizePixel = 0,
 })
-addCorner(header, 14)
-bindTheme(header, "surface")
+rounded(header, 14)
 
--- Covers the lower rounded part of the header so its bottom is straight.
-local headerCover = create("Frame", header, {
-	Position = UDim2.new(0, 0, 1, -14),
-	Size = UDim2.new(1, 0, 0, 14),
-	BackgroundColor3 = palette.surface,
+make("Frame", header, {
+	Position = UDim2.new(0, 0, 1, -12),
+	Size = UDim2.new(1, 0, 0, 12),
+	BackgroundColor3 = theme.surface,
 	BorderSizePixel = 0,
 })
-bindTheme(headerCover, "surface")
 
-local title = create("TextLabel", header, {
+make("TextLabel", header, {
 	Position = UDim2.new(0, 14, 0, 0),
-	Size = UDim2.new(1, -120, 1, 0),
+	Size = UDim2.new(1, -115, 1, 0),
 	BackgroundTransparency = 1,
 	Text = "BUBA MM2",
-	TextColor3 = Color3.fromRGB(255, 255, 255),
-	TextSize = 20,
+	TextColor3 = Color3.new(1, 1, 1),
+	TextSize = 19,
 	Font = Enum.Font.GothamBold,
 	TextXAlignment = Enum.TextXAlignment.Left,
 })
 
-local fpsLabel = create("TextLabel", header, {
-	AnchorPoint = Vector2.new(1, 0.5),
-	Position = UDim2.new(1, -48, 0.5, 0),
-	Size = UDim2.new(0, 62, 0, 28),
-	BackgroundTransparency = 1,
-	Text = "",
-	TextColor3 = Color3.fromRGB(220, 220, 220),
-	TextSize = 12,
-	Font = Enum.Font.Gotham,
-	Visible = false,
-})
-
-local closeButton = create("TextButton", header, {
+local minimize = make("TextButton", header, {
 	AnchorPoint = Vector2.new(1, 0.5),
 	Position = UDim2.new(1, -8, 0.5, 0),
-	Size = UDim2.new(0, 36, 0, 36),
-	BackgroundColor3 = palette.accent,
-	Text = "X",
-	TextColor3 = Color3.fromRGB(255, 255, 255),
-	TextSize = 16,
+	Size = UDim2.new(0, 40, 0, 36),
+	BackgroundColor3 = theme.accent,
+	Text = "—",
+	TextColor3 = Color3.new(1, 1, 1),
+	TextSize = 22,
 	Font = Enum.Font.GothamBold,
-	AutoButtonColor = true,
 })
-addCorner(closeButton, 10)
-table.insert(accentObjects, closeButton)
+rounded(minimize, 9)
 
-local sidebar = create("Frame", main, {
-	Name = "Sidebar",
+local tabsBar = make("Frame", main, {
 	Position = UDim2.new(0, 0, 0, 48),
-	Size = UDim2.new(0, 108, 1, -48),
-	BackgroundColor3 = palette.surface,
-	BorderSizePixel = 0,
-})
-bindTheme(sidebar, "surface")
-
-local content = create("Frame", main, {
-	Name = "Content",
-	Position = UDim2.new(0, 108, 0, 48),
-	Size = UDim2.new(1, -108, 1, -48),
+	Size = UDim2.new(1, 0, 0, 44),
 	BackgroundTransparency = 1,
-	BorderSizePixel = 0,
 })
 
-local floating = create("ImageButton", screenGui, {
-	Name = "FloatingMenu",
-	AnchorPoint = Vector2.new(1, 1),
-	Position = UDim2.new(1, -20, 1, -24),
-	Size = UDim2.new(0, 64, 0, 64),
-	BackgroundColor3 = palette.accent,
-	Image = "rbxassetid://129287367563025",
-	ScaleType = Enum.ScaleType.Crop,
-	Visible = false,
-	AutoButtonColor = false,
+make("UIListLayout", tabsBar, {
+	FillDirection = Enum.FillDirection.Horizontal,
+	HorizontalAlignment = Enum.HorizontalAlignment.Center,
+	VerticalAlignment = Enum.VerticalAlignment.Center,
+	Padding = UDim.new(0, 6),
 })
-addCorner(floating, 100)
-table.insert(accentObjects, floating)
 
-local function makePage(name)
-	local page = create("Frame", content, {
+local pageHolder = make("Frame", main, {
+	Position = UDim2.new(0, 0, 0, 92),
+	Size = UDim2.new(1, 0, 1, -92),
+	BackgroundTransparency = 1,
+})
+
+local pages = {}
+local tabButtons = {}
+
+local function createPage(name)
+	local page = make("Frame", pageHolder, {
 		Name = name,
 		Size = UDim2.fromScale(1, 1),
-		BackgroundColor3 = palette.panel,
-		BorderSizePixel = 0,
+		BackgroundTransparency = 1,
 		Visible = false,
 	})
-	bindTheme(page, "panel")
+	pages[name] = page
 	return page
 end
 
-local playersPage = makePage("PlayersPage")
-local rolesPage = makePage("RolesPage")
-local settingsPage = makePage("SettingsPage")
+local function setTab(name)
+	if not pages[name] then
+		return
+	end
 
-local function makeScroll(parent, name, position, size)
-	local scroll = create("ScrollingFrame", parent, {
+	savedTab = name
+	for pageName, page in pairs(pages) do
+		page.Visible = pageName == name
+	end
+	for tabName, button in pairs(tabButtons) do
+		button.BackgroundColor3 = tabName == name and theme.accent or theme.surface
+	end
+end
+
+for _, name in ipairs({"Players", "Round", "Effects", "Settings"}) do
+	local button = make("TextButton", tabsBar, {
+		Name = name .. "Tab",
+		Size = UDim2.new(0.23, -4, 0, 36),
+		BackgroundColor3 = theme.surface,
+		Text = name,
+		TextColor3 = Color3.new(1, 1, 1),
+		TextSize = 12,
+		Font = Enum.Font.GothamBold,
+	})
+	rounded(button, 8)
+	tabButtons[name] = button
+	button.Activated:Connect(function()
+		setTab(name)
+	end)
+end
+
+local function createScroll(parent, name, position, size)
+	local scroll = make("ScrollingFrame", parent, {
 		Name = name,
 		Position = position,
 		Size = size,
-		BackgroundColor3 = palette.surface,
+		BackgroundColor3 = theme.surface,
 		BorderSizePixel = 0,
-		ScrollBarThickness = 6,
-		ScrollBarImageColor3 = palette.accent,
-		CanvasSize = UDim2.new(0, 0, 0, 0),
+		ScrollBarThickness = 5,
+		CanvasSize = UDim2.new(),
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 	})
-	addCorner(scroll, 10)
-	bindTheme(scroll, "surface")
+	rounded(scroll, 10)
 
-	create("UIPadding", scroll, {
+	make("UIPadding", scroll, {
 		PaddingTop = UDim.new(0, 8),
 		PaddingBottom = UDim.new(0, 8),
 		PaddingLeft = UDim.new(0, 8),
 		PaddingRight = UDim.new(0, 8),
 	})
-
-	create("UIListLayout", scroll, {
+	make("UIListLayout", scroll, {
 		Padding = UDim.new(0, 6),
 		SortOrder = Enum.SortOrder.LayoutOrder,
 	})
-
 	return scroll
 end
 
--- Players page
-local searchBox = create("TextBox", playersPage, {
-	Name = "PlayerSearch",
+-- Players tab
+local playersPage = createPage("Players")
+local search = make("TextBox", playersPage, {
 	Position = UDim2.new(0, 8, 0, 8),
 	Size = UDim2.new(1, -16, 0, 38),
-	BackgroundColor3 = palette.surface,
+	BackgroundColor3 = theme.surface,
 	BorderSizePixel = 0,
 	ClearTextOnFocus = false,
-	PlaceholderText = "Search players...",
-	PlaceholderColor3 = Color3.fromRGB(160, 160, 160),
+	PlaceholderText = "Search username or display name",
+	PlaceholderColor3 = Color3.fromRGB(170, 170, 170),
 	Text = "",
-	TextColor3 = Color3.fromRGB(255, 255, 255),
+	TextColor3 = Color3.new(1, 1, 1),
 	TextSize = 14,
 	Font = Enum.Font.Gotham,
-	TextXAlignment = Enum.TextXAlignment.Left,
 })
-addCorner(searchBox, 9)
-bindTheme(searchBox, "surface")
+rounded(search, 8)
 
-local playerList = makeScroll(
+local playerList = createScroll(
 	playersPage,
 	"PlayerList",
 	UDim2.new(0, 8, 0, 54),
-	UDim2.new(1, -16, 0.42, 0)
+	UDim2.new(1, -16, 0.46, 0)
 )
 
-local profileBox = create("TextLabel", playersPage, {
-	Name = "SelectedPlayerProfile",
-	Position = UDim2.new(0, 8, 0.46, 0),
-	Size = UDim2.new(1, -16, 0.52, -8),
-	BackgroundColor3 = palette.surface,
-	BorderSizePixel = 0,
+local profile = make("TextLabel", playersPage, {
+	Position = UDim2.new(0, 8, 0.48, 0),
+	Size = UDim2.new(1, -16, 0.49, -8),
+	BackgroundColor3 = theme.surface,
 	Text = "Select a player to view their profile.",
-	TextColor3 = Color3.fromRGB(240, 240, 240),
+	TextColor3 = Color3.new(1, 1, 1),
 	TextSize = 14,
 	Font = Enum.Font.Gotham,
 	TextWrapped = true,
 	TextXAlignment = Enum.TextXAlignment.Left,
 	TextYAlignment = Enum.TextYAlignment.Top,
 })
-addCorner(profileBox, 10)
-bindTheme(profileBox, "surface")
+rounded(profile, 10)
 
-create("UIPadding", profileBox, {
-	PaddingTop = UDim.new(0, 10),
-	PaddingBottom = UDim.new(0, 8),
-	PaddingLeft = UDim.new(0, 10),
-	PaddingRight = UDim.new(0, 8),
+-- Round tab
+local roundPage = createPage("Round")
+local roundInfo = make("TextLabel", roundPage, {
+	Position = UDim2.new(0, 8, 0, 8),
+	Size = UDim2.new(1, -16, 0.55, 0),
+	BackgroundColor3 = theme.surface,
+	Text = "No server-published round data available.",
+	TextColor3 = Color3.new(1, 1, 1),
+	TextSize = 14,
+	Font = Enum.Font.Gotham,
+	TextWrapped = true,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextYAlignment = Enum.TextYAlignment.Top,
 })
+rounded(roundInfo, 10)
 
--- Roles page
-local rolesScroll = makeScroll(
-	rolesPage,
-	"RoleAndTestState",
-	UDim2.new(0, 8, 0, 8),
-	UDim2.new(1, -16, 1, -16)
-)
+local historyLabel
+historyLabel = make("TextLabel", roundPage, {
+	Position = UDim2.new(0, 8, 0.58, 0),
+	Size = UDim2.new(1, -16, 0.39, -8),
+	BackgroundColor3 = theme.surface,
+	Text = "No notifications yet.",
+	TextColor3 = Color3.fromRGB(220, 220, 220),
+	TextSize = 12,
+	Font = Enum.Font.Gotham,
+	TextWrapped = true,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextYAlignment = Enum.TextYAlignment.Top,
+})
+rounded(historyLabel, 10)
 
-local rolesInfo = create("TextLabel", rolesScroll, {
-	Name = "RoleInformation",
-	Size = UDim2.new(1, -8, 0, 240),
-	AutomaticSize = Enum.AutomaticSize.Y,
+-- Effects tab: local-only visual effect, no character physics changes.
+local effectsPage = createPage("Effects")
+local effectsText = make("TextLabel", effectsPage, {
+	Position = UDim2.new(0, 12, 0, 12),
+	Size = UDim2.new(1, -24, 0, 62),
 	BackgroundTransparency = 1,
-	Text = "Waiting for server-published test data...",
-	TextColor3 = Color3.fromRGB(240, 240, 240),
-	TextSize = 14,
+	Text = "Visual effects apply only to your own client-side character display.",
+	TextColor3 = Color3.new(1, 1, 1),
+	TextSize = 13,
 	Font = Enum.Font.Gotham,
 	TextWrapped = true,
 	TextXAlignment = Enum.TextXAlignment.Left,
-	TextYAlignment = Enum.TextYAlignment.Top,
 })
 
--- Settings page
-local settingsScroll = makeScroll(
+local effectButton = make("TextButton", effectsPage, {
+	Position = UDim2.new(0, 12, 0, 82),
+	Size = UDim2.new(1, -24, 0, 46),
+	BackgroundColor3 = theme.accent,
+	Text = "Enable self space glow",
+	TextColor3 = Color3.new(1, 1, 1),
+	TextSize = 14,
+	Font = Enum.Font.GothamBold,
+})
+rounded(effectButton, 9)
+
+local launchButton = make("TextButton", effectsPage, {
+	Position = UDim2.new(0, 12, 0, 138),
+	Size = UDim2.new(1, -24, 0, 46),
+	BackgroundColor3 = theme.surface,
+	Text = "Play visual launch effect",
+	TextColor3 = Color3.new(1, 1, 1),
+	TextSize = 14,
+	Font = Enum.Font.GothamBold,
+})
+rounded(launchButton, 9)
+
+local function clearHighlight()
+	if visualHighlight then
+		visualHighlight:Destroy()
+		visualHighlight = nil
+	end
+end
+
+local function applySelfHighlight()
+	clearHighlight()
+	local character = player.Character
+	if character then
+		visualHighlight = Instance.new("Highlight")
+		visualHighlight.Name = "BUBASelfVisualEffect"
+		visualHighlight.FillColor = theme.accent
+		visualHighlight.OutlineColor = Color3.new(1, 1, 1)
+		visualHighlight.FillTransparency = 0.35
+		visualHighlight.Parent = character
+	end
+end
+
+local selfGlowEnabled = false
+effectButton.Activated:Connect(function()
+	selfGlowEnabled = not selfGlowEnabled
+	effectButton.Text = selfGlowEnabled and "Disable self space glow" or "Enable self space glow"
+	if selfGlowEnabled then
+		applySelfHighlight()
+	else
+		clearHighlight()
+	end
+end)
+
+player.CharacterAdded:Connect(function()
+	if selfGlowEnabled then
+		task.wait(0.5)
+		applySelfHighlight()
+	end
+end)
+
+launchButton.Activated:Connect(function()
+	local character = player.Character
+	if not character then
+		notify("Your character is not available.")
+		return
+	end
+
+	local effect = Instance.new("Highlight")
+	effect.Name = "BUBALaunchVisual"
+	effect.Adornee = character
+	effect.FillColor = theme.accent
+	effect.OutlineColor = Color3.new(1, 1, 1)
+	effect.FillTransparency = 0.05
+	effect.OutlineTransparency = 0
+	effect.Parent = character
+
+	local tween = TweenService:Create(
+		effect,
+		TweenInfo.new(1.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{FillTransparency = 1, OutlineTransparency = 1}
+	)
+	tween:Play()
+	tween.Completed:Connect(function()
+		effect:Destroy()
+	end)
+	notify("Played a visual-only launch effect.")
+end)
+
+-- Settings tab
+local settingsPage = createPage("Settings")
+local settingsScroll = createScroll(
 	settingsPage,
-	"Settings",
+	"SettingsList",
 	UDim2.new(0, 8, 0, 8),
 	UDim2.new(1, -16, 1, -16)
 )
 
-local function makeSettingRow(text, buttonText, callback)
-	local row = create("Frame", settingsScroll, {
+local function settingsRow(label, buttonLabel, callback)
+	local row = make("Frame", settingsScroll, {
 		Size = UDim2.new(1, -8, 0, 48),
-		BackgroundColor3 = palette.surface,
-		BorderSizePixel = 0,
+		BackgroundColor3 = theme.surface,
 	})
-	addCorner(row, 9)
-	bindTheme(row, "surface")
+	rounded(row, 8)
 
-	create("TextLabel", row, {
-		Position = UDim2.new(0, 10, 0, 0),
-		Size = UDim2.new(1, -118, 1, 0),
+	make("TextLabel", row, {
+		Position = UDim2.new(0, 9, 0, 0),
+		Size = UDim2.new(1, -120, 1, 0),
 		BackgroundTransparency = 1,
-		Text = text,
-		TextColor3 = Color3.fromRGB(245, 245, 245),
+		Text = label,
+		TextColor3 = Color3.new(1, 1, 1),
 		TextSize = 13,
 		Font = Enum.Font.Gotham,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextWrapped = true,
 	})
 
-	local button = create("TextButton", row, {
+	local button = make("TextButton", row, {
 		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -7, 0.5, 0),
-		Size = UDim2.new(0, 100, 0, 36),
-		BackgroundColor3 = palette.accent,
-		Text = buttonText,
-		TextColor3 = Color3.fromRGB(255, 255, 255),
+		Position = UDim2.new(1, -6, 0.5, 0),
+		Size = UDim2.new(0, 104, 0, 36),
+		BackgroundColor3 = theme.accent,
+		Text = buttonLabel,
+		TextColor3 = Color3.new(1, 1, 1),
 		TextSize = 12,
 		Font = Enum.Font.GothamBold,
-		AutoButtonColor = true,
 	})
-	addCorner(button, 8)
-	table.insert(accentObjects, button)
-
-	button.Activated:Connect(callback)
+	rounded(button, 8)
+	button.Activated:Connect(function()
+		callback(button)
+	end)
 	return button
 end
 
-local paletteButton
-local transparencyButton
-local sizeButton
-local fpsButton
+settingsRow("Change interface accent", theme.name, function(button)
+	themeIndex = (themeIndex % #themes) + 1
+	theme = themes[themeIndex]
+	button.Text = theme.name
 
-paletteButton = makeSettingRow("Menu color theme", "Orange", function()
-	paletteIndex = (paletteIndex % #palettes) + 1
-	palette = palettes[paletteIndex]
-	paletteButton.Text = palette.name
-end)
-
-transparencyButton = makeSettingRow("Panel transparency", "0%", function()
-	transparency = transparency + 0.1
-	if transparency > 0.31 then
-		transparency = 0
-	end
-	transparencyButton.Text = tostring(math.floor(transparency * 100 + 0.5)) .. "%"
-end)
-
-sizeButton = makeSettingRow("Panel size", "Medium", function()
-	sizeIndex = (sizeIndex % #sizeOptions) + 1
-	sizeButton.Text = ({"Small", "Medium", "Large"})[sizeIndex]
-	main.Size = sizeOptions[sizeIndex]
-end)
-
-fpsButton = makeSettingRow("Performance counter", "Off", function()
-	fpsEnabled = not fpsEnabled
-	fpsLabel.Visible = fpsEnabled
-	fpsButton.Text = fpsEnabled and "On" or "Off"
-
-	if fpsEnabled and not fpsConnection then
-		local frameCount = 0
-		local elapsed = 0
-
-		fpsConnection = RunService.RenderStepped:Connect(function(deltaTime)
-			frameCount += 1
-			elapsed += deltaTime
-
-			if elapsed >= 1 then
-				fpsLabel.Text = tostring(math.floor(frameCount / elapsed + 0.5)) .. " FPS"
-				frameCount = 0
-				elapsed = 0
-			end
-		end)
-	elseif not fpsEnabled and fpsConnection then
-		fpsConnection:Disconnect()
-		fpsConnection = nil
-		fpsLabel.Text = ""
-	end
-end)
-
-local function applyTheme()
-	for _, binding in ipairs(themeBindings) do
-		local instance = binding.instance
-		if instance and instance.Parent then
-			if binding.slot == "panel" then
-				instance.BackgroundColor3 = palette.panel
-			elseif binding.slot == "surface" then
-				instance.BackgroundColor3 = palette.surface
-			end
-
-			if instance:IsA("GuiObject") and instance.BackgroundTransparency < 1 then
-				instance.BackgroundTransparency = transparency
-			end
+	main.BackgroundColor3 = theme.panel
+	header.BackgroundColor3 = theme.surface
+	for _, item in ipairs(header:GetChildren()) do
+		if item:IsA("Frame") then
+			item.BackgroundColor3 = theme.surface
 		end
 	end
 
-	for _, instance in ipairs(accentObjects) do
-		if instance and instance.Parent then
-			instance.BackgroundColor3 = palette.accent
-		end
+	minimize.BackgroundColor3 = theme.accent
+	effectButton.BackgroundColor3 = theme.accent
+	for _, tabButton in pairs(tabButtons) do
+		tabButton.BackgroundColor3 = tabButton.Name == savedTab .. "Tab" and theme.accent or theme.surface
 	end
-
-	for _, button in ipairs(navButtons) do
-		if button and button.Parent then
-			button.BackgroundColor3 = button.Name == currentTab .. "Tab"
-				and palette.accent
-				or palette.surface
-		end
+	if selfGlowEnabled then
+		applySelfHighlight()
 	end
+end)
 
-	if playerList then
-		for _, child in ipairs(playerList:GetChildren()) do
-			if child:IsA("TextButton") then
-				child.BackgroundColor3 = child:GetAttribute("Selected")
-					and palette.accent
-					or palette.surface
-			end
-		end
-	end
-end
-
--- Sidebar navigation
-local navLayout = create("UIListLayout", sidebar, {
-	Padding = UDim.new(0, 8),
-	SortOrder = Enum.SortOrder.LayoutOrder,
-	HorizontalAlignment = Enum.HorizontalAlignment.Center,
-})
-
-create("UIPadding", sidebar, {
-	PaddingTop = UDim.new(0, 12),
-	PaddingLeft = UDim.new(0, 8),
-	PaddingRight = UDim.new(0, 8),
-})
-
-local pages = {
-	Players = playersPage,
-	Roles = rolesPage,
-	Settings = settingsPage,
+local sizeChoices = {
+	UDim2.fromScale(0.82, 0.72),
+	UDim2.fromScale(0.90, 0.78),
+	UDim2.fromScale(0.95, 0.84),
 }
+local sizeIndex = 2
 
-local function setTab(tabName)
-	currentTab = tabName
+settingsRow("Adjust panel size", "Medium", function(button)
+	sizeIndex = (sizeIndex % #sizeChoices) + 1
+	button.Text = ({"Small", "Medium", "Large"})[sizeIndex]
+	main.Size = sizeChoices[sizeIndex]
+end)
 
-	for name, page in pairs(pages) do
-		page.Visible = name == tabName
-	end
+settingsRow("Reset panel position", "Reset", function()
+	main.Position = UDim2.fromScale(0.5, 0.5)
+end)
 
-	for _, button in ipairs(navButtons) do
-		button.BackgroundColor3 = button.Name == tabName .. "Tab"
-			and palette.accent
-			or palette.surface
-	end
-end
+settingsRow("Reset visual settings", "Reset", function()
+	selfGlowEnabled = false
+	effectButton.Text = "Enable self space glow"
+	clearHighlight()
+	notify("Local visual settings reset.")
+end)
 
-for _, tabName in ipairs({"Players", "Roles", "Settings"}) do
-	local button = create("TextButton", sidebar, {
-		Name = tabName .. "Tab",
-		Size = UDim2.new(1, 0, 0, 44),
-		BackgroundColor3 = palette.surface,
-		Text = tabName,
-		TextColor3 = Color3.fromRGB(255, 255, 255),
-		TextSize = 13,
-		Font = Enum.Font.GothamBold,
-		TextWrapped = true,
-		AutoButtonColor = true,
-	})
-	addCorner(button, 9)
-	table.insert(navButtons, button)
-
-	button.Activated:Connect(function()
-		setTab(tabName)
-	end)
-end
-
-setTab("Players")
-
--- Server-published test state. Missing state is treated as unknown.
-local stateFolder = nil
-local stateConnections = {}
-local sheriffCharacterConnection = nil
-local sheriffDiedConnection = nil
-local trackedSheriffId = nil
-local sheriffDeathNotifiedFor = nil
-local previousMurdererId = nil
-local previousSheriffId = nil
-local lastGunDropped = nil
-
-local function getStateId(attributeName)
-	if not stateFolder then
-		return nil
-	end
-
-	local value = stateFolder:GetAttribute(attributeName)
-	if typeof(value) == "number" then
-		return value
-	end
-
-	return tonumber(value)
-end
-
-local function getPlayerById(userId)
-	if not userId then
-		return nil
-	end
-
-	for _, player in ipairs(Players:GetPlayers()) do
-		if player.UserId == userId then
-			return player
-		end
-	end
-
-	return nil
-end
-
-local function getRoot(player)
-	local character = player and player.Character
+-- Player information and distance.
+local function rootPart(target)
+	local character = target and target.Character
 	return character and character:FindFirstChild("HumanoidRootPart")
 end
 
-local function getDistance(player)
-	local myRoot = getRoot(localPlayer)
-	local theirRoot = getRoot(player)
-
-	if not myRoot or not theirRoot then
-		return nil
+local function publishedRole(target)
+	if stateFolder then
+		local murdererId = tonumber(stateFolder:GetAttribute("MurdererUserId"))
+		local sheriffId = tonumber(stateFolder:GetAttribute("SheriffUserId"))
+		if murdererId == target.UserId then
+			return "Murderer"
+		elseif sheriffId == target.UserId then
+			return "Sheriff"
+		end
 	end
 
-	return (myRoot.Position - theirRoot.Position).Magnitude
+	local role = target:GetAttribute("MM2Role")
+	return typeof(role) == "string" and role or "Unknown"
 end
 
-local function getRole(player)
-	if not player then
-		return "Unknown"
+local function distanceTo(target)
+	local myRoot = rootPart(player)
+	local targetRoot = rootPart(target)
+	if myRoot and targetRoot then
+		return (myRoot.Position - targetRoot.Position).Magnitude
 	end
-
-	if stateFolder then
-		if player.UserId == getStateId("MurdererUserId") then
-			return "Murderer"
-		elseif player.UserId == getStateId("SheriffUserId") then
-			return "Sheriff"
-		end
-	end
-
-	local roleAttribute = player:GetAttribute("MM2Role")
-	if typeof(roleAttribute) == "string" then
-		local normalized = string.lower(roleAttribute)
-		if normalized == "murderer" then
-			return "Murderer"
-		elseif normalized == "sheriff" then
-			return "Sheriff"
-		elseif normalized == "innocent" then
-			return "Innocent"
-		end
-	end
-
-	return "Unknown"
+	return nil
 end
 
 local function updateProfile()
 	if not selectedPlayer or not selectedPlayer.Parent then
-		profileBox.Text = "Select a player to view their profile."
+		profile.Text = "Select a player to view their profile."
 		return
 	end
 
-	local distance = getDistance(selectedPlayer)
-	local distanceText = distance and (tostring(math.floor(distance + 0.5)) .. " studs") or "Unavailable"
+	local distance = distanceTo(selectedPlayer)
+	local distanceText = distance and (math.floor(distance + 0.5) .. " studs") or "Unavailable"
 
-	profileBox.Text = string.format(
-		"PLAYER PROFILE\n\nDisplay name: %s\nUsername: @%s\nUserId: %d\nAccount age: %d days\nRole: %s\nDistance: %s",
+	profile.Text = string.format(
+		"PLAYER PROFILE\n\nDisplay name: %s\nUsername: @%s\nUserId: %d\nAccount age: %d days\nPublished role: %s\nDistance: %s",
 		selectedPlayer.DisplayName,
 		selectedPlayer.Name,
 		selectedPlayer.UserId,
 		selectedPlayer.AccountAge,
-		getRole(selectedPlayer),
+		publishedRole(selectedPlayer),
 		distanceText
 	)
 end
 
-local function refreshPlayerList()
-	if not playerList or not playerList.Parent then
-		return
-	end
-
+local function refreshPlayers()
 	for _, child in ipairs(playerList:GetChildren()) do
-		if child:IsA("GuiObject") then
+		if child:IsA("TextButton") then
 			child:Destroy()
 		end
 	end
 
-	local query = string.lower(searchBox.Text)
-	local sortedPlayers = Players:GetPlayers()
-
-	table.sort(sortedPlayers, function(a, b)
+	local query = string.lower(search.Text)
+	local list = Players:GetPlayers()
+	table.sort(list, function(a, b)
 		return string.lower(a.DisplayName) < string.lower(b.DisplayName)
 	end)
 
-	for _, player in ipairs(sortedPlayers) do
-		local searchable = string.lower(player.DisplayName .. " " .. player.Name)
-		if query == "" or string.find(searchable, query, 1, true) then
-			local distance = getDistance(player)
-			local distanceText = distance and (tostring(math.floor(distance + 0.5)) .. " studs") or "—"
-			local selected = player == selectedPlayer
+	for _, target in ipairs(list) do
+		local textToSearch = string.lower(target.Name .. " " .. target.DisplayName)
+		if query == "" or string.find(textToSearch, query, 1, true) then
+			local distance = distanceTo(target)
+			local distanceText = distance and (math.floor(distance + 0.5) .. " studs") or "—"
 
-			local row = create("TextButton", playerList, {
-				Name = "Player_" .. player.UserId,
+			local button = make("TextButton", playerList, {
 				Size = UDim2.new(1, -8, 0, 42),
-				BackgroundColor3 = selected and palette.accent or palette.surface,
-				Text = string.format("%s  |  %s  |  %s", player.DisplayName, getRole(player), distanceText),
-				TextColor3 = Color3.fromRGB(255, 255, 255),
+				BackgroundColor3 = target == selectedPlayer and theme.accent or theme.surface,
+				Text = string.format("%s  |  %s  |  %s", target.DisplayName, publishedRole(target), distanceText),
+				TextColor3 = Color3.new(1, 1, 1),
 				TextSize = 12,
 				Font = Enum.Font.Gotham,
 				TextWrapped = true,
-				AutoButtonColor = true,
 			})
-			addCorner(row, 8)
-			row:SetAttribute("Selected", selected)
-
-			row.Activated:Connect(function()
-				selectedPlayer = player
+			rounded(button, 8)
+			button.Activated:Connect(function()
+				selectedPlayer = target
 				updateProfile()
-				refreshPlayerList()
+				refreshPlayers()
 			end)
 		end
 	end
 
 	updateProfile()
-	applyTheme()
 end
 
-searchBox:GetPropertyChangedSignal("Text"):Connect(refreshPlayerList)
-
-local function roleNameForId(userId)
-	local player = getPlayerById(userId)
-	return player and (player.DisplayName .. " (@" .. player.Name .. ")") or "Not in server"
-end
-
-local function updateRolesPage()
-	local murdererId = getStateId("MurdererUserId")
-	local sheriffId = getStateId("SheriffUserId")
-	local lines = {}
-
-	if murdererId then
-		table.insert(lines, "Murderer: " .. roleNameForId(murdererId))
-	else
-		table.insert(lines, "Murderer: Not provided by the test server")
+search:GetPropertyChangedSignal("Text"):Connect(refreshPlayers)
+Players.PlayerAdded:Connect(refreshPlayers)
+Players.PlayerRemoving:Connect(function(leaving)
+	if selectedPlayer == leaving then
+		selectedPlayer = nil
 	end
+	refreshPlayers()
+end)
 
-	if sheriffId then
-		table.insert(lines, "Sheriff: " .. roleNameForId(sheriffId))
-	else
-		table.insert(lines, "Sheriff: Not provided by the test server")
+-- Optional role/round notifications from your own server.
+local function playerNameFromId(value)
+	local id = tonumber(value)
+	if not id then
+		return "Unknown"
 	end
-
-	table.insert(lines, "")
-	table.insert(lines, "Server-published player roles:")
-
-	local hasPublishedRole = false
-	for _, player in ipairs(Players:GetPlayers()) do
-		local role = getRole(player)
-		if role ~= "Unknown" then
-			hasPublishedRole = true
-			table.insert(lines, string.format("%s (@%s): %s", player.DisplayName, player.Name, role))
+	for _, target in ipairs(Players:GetPlayers()) do
+		if target.UserId == id then
+			return target.DisplayName
 		end
 	end
-
-	if not hasPublishedRole then
-		table.insert(lines, "No role attributes are currently available.")
-	end
-
-	table.insert(lines, "")
-	table.insert(lines, "Dropped sheriff gun:")
-
-	local gunDropped = stateFolder and stateFolder:GetAttribute("SheriffGunDropped") == true
-	local position = stateFolder and stateFolder:GetAttribute("DroppedGunPosition")
-
-	if gunDropped then
-		table.insert(lines, "Status: Dropped")
-		if typeof(position) == "Vector3" then
-			table.insert(lines, string.format(
-				"Test location: X %.1f, Y %.1f, Z %.1f",
-				position.X,
-				position.Y,
-				position.Z
-			))
-		else
-			table.insert(lines, "Location: Not provided by the test server")
-		end
-	else
-		table.insert(lines, "Status: Not reported as dropped")
-	end
-
-	rolesInfo.Text = table.concat(lines, "\n")
+	return "Player " .. tostring(id)
 end
 
-local function disconnectSheriffTracking()
-	if sheriffCharacterConnection then
-		sheriffCharacterConnection:Disconnect()
-		sheriffCharacterConnection = nil
-	end
-
-	if sheriffDiedConnection then
-		sheriffDiedConnection:Disconnect()
-		sheriffDiedConnection = nil
-	end
-end
-
-local function attachSheriffCharacter(character)
-	if not character then
+local function refreshRoundInfo()
+	if not stateFolder then
+		roundInfo.Text = "No server-published round data available."
 		return
 	end
 
-	if sheriffDiedConnection then
-		sheriffDiedConnection:Disconnect()
-		sheriffDiedConnection = nil
-	end
+	local round = stateFolder:GetAttribute("RoundStatus") or "Unknown"
+	local murdererId = stateFolder:GetAttribute("MurdererUserId")
+	local sheriffId = stateFolder:GetAttribute("SheriffUserId")
+	local gunDropped = stateFolder:GetAttribute("SheriffGunDropped") == true
 
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid then
-		humanoid = character:WaitForChild("Humanoid", 5)
-	end
-
-	if humanoid and trackedSheriffId then
-		local trackedId = trackedSheriffId
-		sheriffDiedConnection = humanoid.Died:Connect(function()
-			if trackedSheriffId == trackedId and sheriffDeathNotifiedFor ~= trackedId then
-				sheriffDeathNotifiedFor = trackedId
-				notify("BUBA MM2", "The server-published Sheriff character died.")
-			end
-		end)
-	end
+	roundInfo.Text = string.format(
+		"AUTHORIZED TEST SERVER DATA\n\nRound: %s\nMurderer: %s\nSheriff: %s\nSheriff gun reported dropped: %s",
+		tostring(round),
+		murdererId and playerNameFromId(murdererId) or "Not provided",
+		sheriffId and playerNameFromId(sheriffId) or "Not provided",
+		gunDropped and "Yes" or "No"
+	)
 end
 
-local function trackSheriff(userId)
-	if trackedSheriffId == userId then
-		return
-	end
-
-	disconnectSheriffTracking()
-	trackedSheriffId = userId
-	sheriffDeathNotifiedFor = nil
-
-	local sheriff = getPlayerById(userId)
-	if not sheriff then
-		return
-	end
-
-	if sheriff.Character then
-		attachSheriffCharacter(sheriff.Character)
-	end
-
-	sheriffCharacterConnection = sheriff.CharacterAdded:Connect(attachSheriffCharacter)
-end
-
-local function bindStateFolder(folder)
+local function bindState(folder)
 	for _, connection in ipairs(stateConnections) do
 		connection:Disconnect()
 	end
 	table.clear(stateConnections)
 
 	stateFolder = folder
-	previousMurdererId = getStateId("MurdererUserId")
-	previousSheriffId = getStateId("SheriffUserId")
-	lastGunDropped = folder:GetAttribute("SheriffGunDropped") == true
+	previousRound = folder:GetAttribute("RoundStatus")
+	previousMurderer = folder:GetAttribute("MurdererUserId")
+	previousSheriff = folder:GetAttribute("SheriffUserId")
+	previousGunDropped = folder:GetAttribute("SheriffGunDropped") == true
 
-	trackSheriff(previousSheriffId)
+	local watchedAttributes = {
+		"RoundStatus",
+		"MurdererUserId",
+		"SheriffUserId",
+		"SheriffGunDropped",
+	}
 
-	table.insert(stateConnections, folder:GetAttributeChangedSignal("MurdererUserId"):Connect(function()
-		local newId = getStateId("MurdererUserId")
-		if previousMurdererId and newId ~= previousMurdererId then
-			notify("BUBA MM2", "The test server reported a Murderer role change.")
-		end
-		previousMurdererId = newId
-		updateRolesPage()
-		refreshPlayerList()
-	end))
+	for _, attribute in ipairs(watchedAttributes) do
+		table.insert(stateConnections, folder:GetAttributeChangedSignal(attribute):Connect(function()
+			local value = folder:GetAttribute(attribute)
 
-	table.insert(stateConnections, folder:GetAttributeChangedSignal("SheriffUserId"):Connect(function()
-		local newId = getStateId("SheriffUserId")
-		if previousSheriffId and newId ~= previousSheriffId then
-			notify("BUBA MM2", "The test server reported a Sheriff role change.")
-		end
-		previousSheriffId = newId
-		trackSheriff(newId)
-		updateRolesPage()
-		refreshPlayerList()
-	end))
-
-	table.insert(stateConnections, folder:GetAttributeChangedSignal("SheriffGunDropped"):Connect(function()
-		local isDropped = folder:GetAttribute("SheriffGunDropped") == true
-
-		if isDropped and not lastGunDropped then
-			local position = folder:GetAttribute("DroppedGunPosition")
-			if typeof(position) == "Vector3" then
-				notify("BUBA MM2", string.format(
-					"Sheriff gun dropped at X %.1f, Y %.1f, Z %.1f.",
-					position.X,
-					position.Y,
-					position.Z
-				))
-			else
-				notify("BUBA MM2", "The test server reported that the Sheriff gun was dropped.")
+			if attribute == "RoundStatus" and previousRound ~= nil and value ~= previousRound then
+				notify("Round status changed: " .. tostring(value))
+				previousRound = value
+			elseif attribute == "MurdererUserId" and previousMurderer ~= nil and value ~= previousMurderer then
+				notify("Published Murderer changed: " .. playerNameFromId(value))
+				previousMurderer = value
+			elseif attribute == "SheriffUserId" and previousSheriff ~= nil and value ~= previousSheriff then
+				notify("Published Sheriff changed: " .. playerNameFromId(value))
+				previousSheriff = value
+			elseif attribute == "SheriffGunDropped" then
+				local dropped = value == true
+				if dropped and not previousGunDropped then
+					notify("The test server reported a dropped Sheriff gun.")
+				end
+				previousGunDropped = dropped
 			end
-		end
 
-		lastGunDropped = isDropped
-		updateRolesPage()
-	end))
+			refreshRoundInfo()
+			refreshPlayers()
+		end))
+	end
 
-	table.insert(stateConnections, folder:GetAttributeChangedSignal("DroppedGunPosition"):Connect(updateRolesPage))
-
-	updateRolesPage()
-	refreshPlayerList()
+	refreshRoundInfo()
+	refreshPlayers()
 end
 
-local existingState = ReplicatedStorage:FindFirstChild("MM2TestState")
+local existingState = ReplicatedStorage:FindFirstChild("MM2PublicState")
 if existingState and existingState:IsA("Folder") then
-	bindStateFolder(existingState)
+	bindState(existingState)
 end
 
 ReplicatedStorage.ChildAdded:Connect(function(child)
-	if child.Name == "MM2TestState" and child:IsA("Folder") then
-		bindStateFolder(child)
+	if child.Name == "MM2PublicState" and child:IsA("Folder") then
+		bindState(child)
 	end
 end)
 
--- Player list refresh and role/profile refresh.
-Players.PlayerAdded:Connect(function()
-	refreshPlayerList()
-	updateRolesPage()
-end)
-
-Players.PlayerRemoving:Connect(function(player)
-	if selectedPlayer == player then
-		selectedPlayer = nil
-	end
-	refreshPlayerList()
-	updateRolesPage()
-end)
-
--- Draggable main panel: drag from its title bar.
+-- Draggable main window, dragged from the header.
 do
 	local dragging = false
-	local dragInput = nil
-	local dragStart = nil
-	local startPosition = nil
+	local dragStart
+	local startPosition
 
 	header.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1
@@ -893,7 +694,6 @@ do
 			dragging = true
 			dragStart = input.Position
 			startPosition = main.Position
-
 			input.Changed:Connect(function()
 				if input.UserInputState == Enum.UserInputState.End then
 					dragging = false
@@ -902,108 +702,142 @@ do
 		end
 	end)
 
-	header.InputChanged:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseMovement
-			or input.UserInputType == Enum.UserInputType.Touch then
-			dragInput = input
-		end
-	end)
-
 	UserInputService.InputChanged:Connect(function(input)
-		if dragging and input == dragInput then
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch) then
 			local delta = input.Position - dragStart
 			main.Position = UDim2.new(
-				startPosition.X.Scale,
-				startPosition.X.Offset + delta.X,
-				startPosition.Y.Scale,
-				startPosition.Y.Offset + delta.Y
+				startPosition.X.Scale, startPosition.X.Offset + delta.X,
+				startPosition.Y.Scale, startPosition.Y.Offset + delta.Y
 			)
 		end
 	end)
 end
 
--- Draggable floating logo. Tap it to reopen the panel.
+-- Circular floating logo with automatic primary -> backup -> fallback icon.
+local floating = make("TextButton", gui, {
+	Name = "FloatingLogo",
+	AnchorPoint = Vector2.new(1, 1),
+	Position = UDim2.new(1, -18, 1, -22),
+	Size = UDim2.new(0, 62, 0, 62),
+	BackgroundColor3 = theme.surface,
+	Text = "B",
+	TextColor3 = theme.accent,
+	TextSize = 27,
+	Font = Enum.Font.GothamBold,
+	Visible = false,
+	ClipsDescendants = true,
+	AutoButtonColor = false,
+})
+rounded(floating, 100)
+
+make("UIStroke", floating, {
+	Color = theme.accent,
+	Thickness = 2,
+	Transparency = 0.1,
+})
+
+local logoImage = make("ImageLabel", floating, {
+	Name = "LogoImage",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1,
+	Image = "",
+	ScaleType = Enum.ScaleType.Crop,
+	Visible = false,
+})
+rounded(logoImage, 100)
+
+local function tryLogo(assetId)
+	local loaded = false
+	local asset = assetId
+
+	local success = pcall(function()
+		ContentProvider:PreloadAsync({asset}, function(_, status)
+			if status == Enum.AssetFetchStatus.Success then
+				loaded = true
+			end
+		end)
+	end)
+
+	if success and loaded then
+		logoImage.Image = asset
+		logoImage.Visible = true
+		floating.Text = ""
+		return true
+	end
+	return false
+end
+
+task.spawn(function()
+	if not tryLogo(PRIMARY_LOGO) then
+		if not tryLogo(BACKUP_LOGO) then
+			logoImage.Visible = false
+			floating.Text = "B"
+		end
+	end
+end)
+
+local function reopenMenu()
+	main.Visible = true
+	floating.Visible = false
+	setTab(savedTab)
+end
+
+minimize.Activated:Connect(function()
+	main.Visible = false
+	floating.Visible = true
+end)
+
+-- Drag the logo; a short tap reopens the menu.
 do
-	local startInput = nil
-	local dragInput = nil
-	local dragStart = nil
-	local startPosition = nil
-	local moved = false
-	local dragging = false
+	local activeInput
+	local startPosition
+	local startPoint
+	local wasDragged = false
 
 	floating.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch then
-			startInput = input
-			dragStart = input.Position
+			activeInput = input
 			startPosition = floating.Position
-			moved = false
-			dragging = true
-		end
-	end)
-
-	floating.InputChanged:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseMovement
-			or input.UserInputType == Enum.UserInputType.Touch then
-			dragInput = input
+			startPoint = input.Position
+			wasDragged = false
 		end
 	end)
 
 	UserInputService.InputChanged:Connect(function(input)
-		if dragging and input == dragInput then
-			local delta = input.Position - dragStart
-
-			if math.abs(delta.X) > 7 or math.abs(delta.Y) > 7 then
-				moved = true
-			end
-
-			if moved then
+		if activeInput and (input == activeInput or input.UserInputType == Enum.UserInputType.MouseMovement) then
+			local delta = input.Position - startPoint
+			if math.abs(delta.X) > 6 or math.abs(delta.Y) > 6 then
+				wasDragged = true
 				floating.Position = UDim2.new(
-					startPosition.X.Scale,
-					startPosition.X.Offset + delta.X,
-					startPosition.Y.Scale,
-					startPosition.Y.Offset + delta.Y
+					startPosition.X.Scale, startPosition.X.Offset + delta.X,
+					startPosition.Y.Scale, startPosition.Y.Offset + delta.Y
 				)
 			end
 		end
 	end)
 
 	UserInputService.InputEnded:Connect(function(input)
-		if dragging and (input == startInput or input.UserInputType == Enum.UserInputType.MouseButton1) then
-			dragging = false
-
-			if not moved then
-				main.Visible = true
-				floating.Visible = false
+		if activeInput and (input == activeInput
+			or input.UserInputType == Enum.UserInputType.MouseButton1) then
+			if not wasDragged then
+				reopenMenu()
 			end
+			activeInput = nil
 		end
 	end)
 end
 
-closeButton.Activated:Connect(function()
-	main.Visible = false
-	floating.Visible = true
-end)
-
-local function refreshAll()
-	refreshPlayerList()
-	updateRolesPage()
-end
-
--- Apply initial settings and keep displayed distances current.
-applyTheme()
-refreshAll()
+setTab(savedTab)
+refreshPlayers()
+refreshRoundInfo()
 
 task.spawn(function()
-	while screenGui.Parent do
+	while gui.Parent do
 		task.wait(2)
-		refreshAll()
-	end
-end)
-
--- Update an already-selected player's distance without waiting for list refresh.
-RunService.Heartbeat:Connect(function()
-	if selectedPlayer and selectedPlayer.Parent then
-		updateProfile()
+		if main.Visible then
+			refreshPlayers()
+		end
 	end
 end)
